@@ -4,6 +4,10 @@ import vlc
 from pydub.playback import play
 from pydub import AudioSegment, silence
 import time
+import io
+import threading
+import pydub.playback as playback
+
 
 # Initialize OpenAI API
 openai.api_key = ''
@@ -14,7 +18,7 @@ def TestStreamSpeakers(stream_id):
     machines speakers through VLC. Purposed for debugging
     and testing obfuscated HTTP requests for exposed endpoints.
 
-    :param str stream_id: The stream we are trying to connect to.
+    :param int stream_id: The stream we are trying to connect to.
     '''
 
     # Configure streaming source endpoint URL
@@ -33,54 +37,52 @@ def TestStreamSpeakers(stream_id):
     input("Press Enter to stop playing...")
     player.stop()
 
-def TranscribeStreamWithWhisper(stream_id, duration=5):
+def TranscribeStreamWithWhisper(stream_id, silence_thresh=-50.0, min_silence_len=1000):
     '''
-    This function captures a segment of a Broadcastify stream for a specified duration, 
-    saves it to a file, chunks the audio based on silence, and transcribes each chunk using
+    This function captures a Broadcastify stream in real-time, 
+    chunks the audio based on silence, and transcribes each chunk using
     OpenAI's Whisper.
 
-    :param str stream_id: The stream we are trying to connect to.
-    :param int duration: Duration in seconds to capture the stream.
+    :param int stream_id: The stream we are trying to connect to.
     '''
-
     # Configure streaming source endpoint URL
     stream_url = f'https://broadcastify.cdnstream1.com/{stream_id}'
 
-    # Record the stream using pydub for the specified duration
+    # Initialize an empty buffer to hold audio data
+    audio_buffer = AudioSegment.empty()
+
+    # Start streaming
     stream_data = requests.get(stream_url, stream=True)
-    start_time = time.time()
-    with open("temp_stream.mp3", "wb") as f:
-        for chunk in stream_data.iter_content(chunk_size=1024):
-            if time.time() - start_time > duration:
-                break
-            if chunk:
-                f.write(chunk)
 
-    # Convert the recorded stream to wav format
-    audio = AudioSegment.from_mp3("temp_stream.mp3")
-    audio.export("temp_stream.wav", format="wav")
+    for chunk in stream_data.iter_content(chunk_size=1024):
+        if chunk:
+            # Append chunk to buffer
+            audio_buffer += AudioSegment.from_mp3(io.BytesIO(chunk))
 
-    # Split the audio into chunks based on silence
-    chunks = silence.split_on_silence(audio, silence_thresh=-50.0, min_silence_len=500, keep_silence=100)
+            # Check for silence in the buffer
+            silent_chunks = silence.detect_silence(audio_buffer, silence_thresh=silence_thresh, min_silence_len=min_silence_len)
 
-    print(len(chunks))
-    # Transcribe each chunk using Whisper
-    for chunk in chunks:
-        chunk.export("temp_chunk.wav", format="wav")
-        with open("temp_chunk.wav", "rb") as audio_file:
-            transcript = openai.Audio.transcribe("whisper-1", audio_file)
-            text = transcript["text"]
-            if text != 'Thanks for watching!':
-                print(text)
+            # If silence is detected, consider the preceding audio as a chunk for transcription
+            if silent_chunks:
+                start_time, end_time = silent_chunks[0]
+                audio_chunk = audio_buffer[:start_time]
 
-    # Play the original audio file for comparison
-    print("\nPlaying the original audio...")
-    play(audio)
+                # Check if the audio_chunk is at least 0.1 seconds long
+                if len(audio_chunk) >= 100:  # 100 milliseconds = 0.1 seconds
+                    # Send audio_chunk for transcription
+                    audio_chunk.export("temp_chunk.wav", format="wav")
+                    with open("temp_chunk.wav", "rb") as audio_file:
+                        transcript = openai.Audio.transcribe("whisper-1", audio_file)
+                        print(transcript["text"])
+
+                # Clear the buffer up to the detected silence
+                audio_buffer = audio_buffer[end_time:]
 
 
 
 if __name__ == "__main__":
     stream_id = ''
+
 
     #TestStreamSpeakers(stream_id=stream_id)
     TranscribeStreamWithWhisper(stream_id=stream_id)
